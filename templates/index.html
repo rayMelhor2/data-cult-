@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>PDF Категоризация</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="navbar">
+    <button onclick="showTab('upload')">Загрузка</button>
+    <button onclick="showTab('categories')">Категории</button>
+    <button onclick="showTab('files')">Файлы</button>
+  </div>
+
+  <div id="upload" class="tab-content active">
+    <div class="upload-box" id="drop-area">
+      <p>Перетащите PDF сюда или <span id="browse">нажмите</span></p>
+      <input type="file" id="fileElem" accept="application/pdf" hidden>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <div id="categories" class="tab-content">
+    <h2>Категории</h2>
+    <div class="category-actions">
+      <input type="text" id="category-name" placeholder="Новая категория">
+      <button onclick="addCategory()">Добавить категорию</button>
+    </div>
+    <table id="categories-table">
+      <thead>
+        <tr>
+          <th>Категория</th>
+          <th>Подкатегории</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div id="files" class="tab-content">
+    <h2>Файлы</h2>
+    <div class="search-container">
+      <input type="text" id="file-search-query" placeholder="Поиск по файлам..." oninput="searchFiles()">
+    </div>
+    <div id="file-tree"></div>
+    <iframe id="pdf-viewer" width="100%" height="500px" style="margin-top: 20px;"></iframe>
+  </div>
+
+  <script>
+    function showTab(tabName) {
+      document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
+      document.getElementById(tabName).classList.add('active');
+    }
+
+    const dropArea = document.getElementById('drop-area');
+    const fileInput = document.getElementById('fileElem');
+    const browseText = document.getElementById('browse');
+    const status = document.getElementById('status');
+
+    browseText.onclick = () => fileInput.click();
+    fileInput.onchange = () => uploadFile(fileInput.files[0]);
+
+    dropArea.addEventListener('dragover', e => {
+      e.preventDefault();
+      dropArea.classList.add('highlight');
+    });
+    dropArea.addEventListener('dragleave', () => dropArea.classList.remove('highlight'));
+    dropArea.addEventListener('drop', e => {
+      e.preventDefault();
+      dropArea.classList.remove('highlight');
+      const file = e.dataTransfer.files[0];
+      if (file) uploadFile(file);
+    });
+
+    function uploadFile(file) {
+      if (file.type !== 'application/pdf') {
+        status.textContent = 'Только PDF!';
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('file', file);
+
+      fetch('/upload', {
+        method: 'POST',
+        body: formData
+      })
+        .then(res => res.json())
+        .then(data => {
+          status.textContent = data.message;
+          status.style.color = data.success ? 'green' : 'red';
+          loadFileTree();
+        })
+        .catch(() => {
+          status.textContent = 'Ошибка при загрузке';
+          status.style.color = 'red';
+        });
+    }
+
+    function loadCategories() {
+      fetch('/get_categories')
+        .then(res => res.json())
+        .then(categories => {
+          const tbody = document.querySelector('#categories-table tbody');
+          tbody.innerHTML = '';
+          Object.entries(categories).forEach(([category, data]) => {
+            const subcats = data.subcategories.map(sub => `
+              <span class="subcategory-item">
+                ${sub}
+                <span class="delete-sub" onclick="deleteSubcategory('${category}', '${sub}')">×</span>
+              </span>
+            `).join(' ');
+            const row = document.createElement('tr');
+            row.innerHTML = `
+              <td>
+                ${category}
+                <span class="delete-category" onclick="deleteCategory('${category}')">×</span>
+              </td>
+              <td>
+                <input type="text" id="subcategory-${category}" placeholder="Подкатегория">
+                <button onclick="addSubcategory('${category}')">Добавить</button>
+                <div class="subcategory-list">${subcats}</div>
+              </td>
+            `;
+            tbody.appendChild(row);
+          });
+        });
+    }
+
+    function addCategory() {
+      const name = document.getElementById('category-name').value.trim();
+      if (!name) return alert('Введите название');
+      fetch('/add_category', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category: name })
+      }).then(() => loadCategories());
+    }
+
+    function deleteCategory(category) {
+      if (!confirm('Удалить категорию и все подкатегории?')) return;
+      fetch('/delete_category', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category })
+      }).then(() => {
+        loadCategories();
+        loadFileTree();
+      });
+    }
+
+    function addSubcategory(category) {
+      const input = document.getElementById(`subcategory-${category}`);
+      const name = input.value.trim();
+      if (!name) return;
+      fetch('/add_subcategory', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category, subcategory: name })
+      }).then(() => loadCategories());
+    }
+
+    function deleteSubcategory(category, subcategory) {
+      if (!confirm('Удалить подкатегорию?')) return;
+      fetch('/delete_subcategory', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category, subcategory })
+      }).then(() => {
+        loadCategories();
+        loadFileTree();
+      });
+    }
+
+    function buildTree(data, basePath = '') {
+      const ul = document.createElement('ul');
+      data.forEach(item => {
+        const li = document.createElement('li');
+        if (item.type === 'folder') {
+          li.className = 'folder';
+          li.textContent = item.name;
+          li.appendChild(buildTree(item.children, basePath + item.name + '/'));
+          li.ondragover = e => e.preventDefault();
+          li.ondrop = e => {
+            const filePath = e.dataTransfer.getData('text/plain');
+            const fileName = filePath.split('/').pop();
+            const newPath = basePath + item.name + '/' + fileName;
+            moveFile(filePath, newPath);
+          };
+        } else if (item.type === 'file') {
+          li.className = 'file';
+          li.draggable = true;
+          li.ondragstart = e => e.dataTransfer.setData('text/plain', item.path);
+          li.innerHTML = `
+            ${item.name}
+            <span class="delete-file" onclick="deleteFile('${item.path}')">×</span>
+          `;
+          li.onclick = () => {
+            document.getElementById('pdf-viewer').src = '/view_pdf/' + encodeURIComponent(item.path);
+          };
+        }
+        ul.appendChild(li);
+      });
+      return ul;
+    }
+
+    function loadFileTree() {
+      fetch('/file_tree')
+        .then(res => res.json())
+        .then(data => {
+          const container = document.getElementById('file-tree');
+          container.innerHTML = '';
+          container.appendChild(buildTree(data));
+        });
+    }
+
+    function moveFile(fromPath, toPath) {
+      fetch('/move_file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: fromPath, to: toPath })
+      })
+        .then(res => res.json())
+        .then(data => {
+          if (data.success) loadFileTree();
+          else alert(data.message);
+        });
+    }
+
+    function deleteFile(filePath) {
+      if (!confirm('Удалить файл и текст?')) return;
+      fetch('/delete_file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: filePath })
+      })
+        .then(res => res.json())
+        .then(data => {
+          if (data.success) loadFileTree();
+          else alert(data.message);
+        });
+    }
+
+    function searchFiles() {
+      const query = document.getElementById('file-search-query').value.toLowerCase();
+
+      if (!query) {
+        loadFileTree(); // очищено — показываем всё
+        return;
+      }
+
+      const fileElements = document.querySelectorAll('#file-tree .file');
+      const fetches = [];
+
+      fileElements.forEach(fileEl => {
+        const fileName = fileEl.textContent.toLowerCase();
+        const filePath = fileEl.querySelector('.delete-file')?.getAttribute('onclick')?.match(/'([^']+)'/)?.[1];
+
+        fileEl.style.display = 'none';
+
+        if (fileName.includes(query)) {
+          fileEl.style.display = 'block';
+          showParentFolders(fileEl);
+          return;
+        }
+
+        if (filePath) {
+          const fetchPromise = fetch('/view_pdf/' + encodeURIComponent(filePath.replace('.pdf', '.json')))
+            .then(res => res.ok ? res.json() : Promise.reject())
+            .then(data => {
+              const text = (data.text || '').toLowerCase();
+              if (text.includes(query)) {
+                fileEl.style.display = 'block';
+                showParentFolders(fileEl);
+              }
+            })
+            .catch(() => {});
+          fetches.push(fetchPromise);
+        }
+      });
+
+      Promise.all(fetches).then(() => {
+        document.querySelectorAll('#file-tree .folder').forEach(folder => {
+          const visibleChildren = folder.querySelectorAll('.file:not([style*="display: none"])');
+          folder.style.display = visibleChildren.length > 0 ? 'block' : 'none';
+        });
+      });
+    }
+
+    function showParentFolders(fileElement) {
+      let parent = fileElement.parentElement;
+      while (parent && parent.id !== 'file-tree') {
+        if (parent.tagName.toLowerCase() === 'li' && parent.classList.contains('folder')) {
+          parent.style.display = 'block';
+        }
+        parent = parent.parentElement;
+      }
+    }
+
+    loadCategories();
+    loadFileTree();
+  </script>
+</body>
+</html>
