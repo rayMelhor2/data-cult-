@@ -1,15 +1,14 @@
 from flask import Flask, request, render_template, jsonify, send_from_directory
-from werkzeug.utils import secure_filename
 import os, json, re, shutil
 import pytesseract
-from pytesseract import convert_from_path
 from sentence_transformers import SentenceTransformer, util
 import nltk
 from nltk.corpus import stopwords
+from pdf2image import convert_from_path
 
 app = Flask(__name__)
 UPLOAD_FOLDER = 'files'
-CATEGORIES_FILE = 'categories.json'
+CATEGORIES_FILE = 'cat.json'
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -25,20 +24,6 @@ def load_categories():
     with open(CATEGORIES_FILE, 'r', encoding='utf-8') as f:
         return json.load(f)
 
-def save_categories(categories):
-    with open(CATEGORIES_FILE, 'w', encoding='utf-8') as f:
-        json.dump(categories, f, ensure_ascii=False, indent=2)
-
-def clean_filename(filename):
-    return re.sub(r'[^\w\s.-а-яА-ЯёЁ]', '', filename)
-
-def preprocess_text(text):
-    text = text.lower()
-    text = re.sub(r'\s+', ' ', text)
-    text = re.sub(r'[^a-zа-яё0-9\s]', '', text)
-    words = text.split()
-    words = [w for w in words if w not in stop_words]
-    return ' '.join(words)
 
 def extract_text_from_pdf(pdf_path):
     images = convert_from_path(pdf_path, dpi=150)
@@ -65,12 +50,17 @@ def upload():
     if not file or not file.filename.lower().endswith('.pdf'):
         return jsonify({'success': False, 'message': 'Загрузите PDF-файл'})
 
-    filename = clean_filename(file.filename)
+    filename = re.sub(r'[^\w\s.-а-яА-ЯёЁ]', '', file.filename)
     temp_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
     file.save(temp_path)
 
     text = extract_text_from_pdf(temp_path)
-    processed_text = preprocess_text(text)
+    text = text.lower()
+    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'[^a-zа-яё0-9\s]', '', text)
+    words = text.split()
+    words = [w for w in words if w not in stop_words]
+    processed_text = ' '.join(words)
     text_embedding = model.encode([processed_text])[0]
 
     categories = load_categories()
@@ -100,9 +90,12 @@ def upload():
     final_path = os.path.join(target_dir, filename)
     os.rename(temp_path, final_path)
 
-    save_text_as_json(final_path, text)
-
-    return jsonify({'success': True, 'message': f'Файл сохранён в: {assigned_category} → {assigned_subcategory}'})
+    json_filename = os.path.splitext(final_path)[0] + '.json'
+    json_path = os.path.join(app.config['UPLOAD_FOLDER'], os.path.relpath(json_filename, UPLOAD_FOLDER))
+    os.makedirs(os.path.dirname(json_path), exist_ok=True)
+    with open(json_path, 'w', encoding='utf-8') as json_file:
+        json.dump({"text": text}, json_file, ensure_ascii=False, indent=4)
+    return jsonify({'success': True, 'message': f'Файл сохранён в категорию: {assigned_category}   и емм былаа присвоена под категория: {assigned_subcategory}'})
 
 @app.route('/get_categories', methods=['GET'])
 def get_categories():
@@ -120,7 +113,8 @@ def add_category():
         return jsonify({'success': False, 'message': 'Категория уже есть'})
 
     categories[category] = {"subcategories": []}
-    save_categories(categories)
+    with open(CATEGORIES_FILE, 'w', encoding='utf-8') as f:
+        json.dump(categories, f, ensure_ascii=False, indent=2)
     os.makedirs(os.path.join(app.config['UPLOAD_FOLDER'], category), exist_ok=True)
     return jsonify({'success': True})
 
@@ -137,7 +131,8 @@ def add_subcategory():
         return jsonify({'success': False, 'message': 'Подкатегория уже есть'})
 
     categories[category]["subcategories"].append(sub)
-    save_categories(categories)
+    with open(CATEGORIES_FILE, 'w', encoding='utf-8') as f:
+        json.dump(categories, f, ensure_ascii=False, indent=2)
     os.makedirs(os.path.join(app.config['UPLOAD_FOLDER'], category, sub), exist_ok=True)
     return jsonify({'success': True})
 
@@ -150,7 +145,8 @@ def delete_category():
         return jsonify({'success': False, 'message': 'Категория не найдена'})
 
     del categories[category]
-    save_categories(categories)
+    with open(CATEGORIES_FILE, 'w', encoding='utf-8') as f:
+        json.dump(categories, f, ensure_ascii=False, indent=2)
 
     path = os.path.join(app.config['UPLOAD_FOLDER'], category)
     if os.path.exists(path):
@@ -166,7 +162,8 @@ def delete_subcategory():
     categories = load_categories()
     if category in categories and sub in categories[category]["subcategories"]:
         categories[category]["subcategories"].remove(sub)
-        save_categories(categories)
+        with open(CATEGORIES_FILE, 'w', encoding='utf-8') as f:
+            json.dump(categories, f, ensure_ascii=False, indent=2)
         sub_path = os.path.join(app.config['UPLOAD_FOLDER'], category, sub)
         if os.path.exists(sub_path):
             shutil.rmtree(sub_path, ignore_errors=True)
@@ -178,10 +175,8 @@ def delete_file():
     data = request.json
     rel_path = data.get('path')
     abs_path = os.path.join(app.config['UPLOAD_FOLDER'], rel_path)
-
     if not os.path.exists(abs_path):
         return jsonify({'success': False, 'message': 'Файл не найден'})
-
     os.remove(abs_path)
     json_path = os.path.splitext(abs_path)[0] + '.json'
     if os.path.exists(json_path):
@@ -215,14 +210,9 @@ def move_file():
     data = request.json
     src = os.path.join(app.config['UPLOAD_FOLDER'], data['from'])
     dst = os.path.join(app.config['UPLOAD_FOLDER'], data['to'])
-
-    if not os.path.exists(src):
-        return jsonify({'success': False, 'message': 'Файл не найден'})
-
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     os.rename(src, dst)
 
-    # переместим json
     src_json = os.path.splitext(src)[0] + '.json'
     dst_json = os.path.splitext(dst)[0] + '.json'
     if os.path.exists(src_json):

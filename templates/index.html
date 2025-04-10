@@ -228,7 +228,7 @@
     }
 
     function deleteFile(filePath) {
-      if (!confirm('Удалить файл и текст?')) return;
+      if (!confirm('Удалить файл?')) return;
       fetch('/delete_file', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -245,7 +245,7 @@
       const query = document.getElementById('file-search-query').value.toLowerCase();
 
       if (!query) {
-        loadFileTree(); // очищено — показываем всё
+        loadFileTree();
         return;
       }
 
